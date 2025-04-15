@@ -1,0 +1,321 @@
+# -*- coding: utf-8 -*-
+"""
+CaseFlow Tracker - Simple Legal Case Management Web App
+
+Core Flask application file handling routing, data persistence (in-memory),
+CRUD operations, and CSV import/export for legal case tracking.
+"""
+
+import os
+import csv
+import io # Used for handling in-memory text streams (like CSV data)
+from datetime import datetime, timezone
+from flask import (
+    Flask,
+    render_template,
+    request,
+    redirect,
+    url_for,
+    flash,
+    Response, # Used for sending file downloads (CSV export)
+)
+
+# --- Application Setup ---
+app = Flask(__name__)
+# SECRET_KEY is needed for session management (used by flash messages).
+# Use environment variable in production, hardcoded here for simplicity.
+app.config['SECRET_KEY'] = os.environ.get('FLASK_SECRET_KEY', 'a_default_very_secret_key')
+
+# --- In-Memory Data Store ---
+# WARNING: Data is lost when the application restarts.
+# A database (e.g., SQLite, PostgreSQL) is essential for production.
+cases = []
+next_id = 1 # Simple auto-incrementing ID for this example
+
+# Define standard case statuses
+# Using a tuple for immutability
+CASE_STATUSES = ('Open', 'Pending', 'Discovery', 'Hearing Scheduled', 'Settled', 'Closed', 'Archived')
+
+# --- Helper Functions ---
+
+def find_case_by_id(case_id):
+    """Locates a case in the in-memory list by its ID."""
+    # List comprehension provides a concise way to find the first match or None.
+    found_case = next((case for case in cases if case['id'] == case_id), None)
+    return found_case
+
+def validate_case_data(form_data, is_edit=False):
+    """Performs basic validation on submitted case form data."""
+    errors = {}
+    # Check required fields
+    for field in ['case_number', 'case_name', 'client_name', 'status']:
+        if not form_data.get(field):
+            errors[field] = ['This field is required.']
+
+    # Validate status
+    if form_data.get('status') not in CASE_STATUSES:
+        errors['status'] = [f'Invalid status. Must be one of: {", ".join(CASE_STATUSES)}']
+
+    # Validate deadline date format if provided
+    deadline_str = form_data.get('deadline')
+    if deadline_str:
+        try:
+            # Check if the format is correct (YYYY-MM-DD)
+            datetime.strptime(deadline_str, '%Y-%m-%d')
+        except ValueError:
+            errors['deadline'] = ['Invalid date format. Please use YYYY-MM-DD.']
+
+    return errors
+
+# --- Routes ---
+
+@app.route('/')
+def index():
+    """Displays the main dashboard with the list of all cases."""
+    # Sort cases by ID or date could be added here for better presentation
+    # Pass the cases list to the Jinja2 template.
+    return render_template('index.html', cases=cases)
+
+@app.route('/case/add', methods=['GET', 'POST'])
+def add_case():
+    """Handles displaying the form and processing submission for new cases."""
+    global next_id # Declare intention to modify the global variable
+
+    if request.method == 'POST':
+        form_data = request.form
+        errors = validate_case_data(form_data)
+
+        if errors:
+            # If validation fails, re-render the form with errors and existing data
+            flash('Please correct the errors below.', 'error')
+            # Re-pass form data back to template to repopulate fields
+            return render_template('case_form.html',
+                                   form_title="Add New Case",
+                                   submit_button_text="Add Case",
+                                   statuses=CASE_STATUSES,
+                                   case=form_data, # Pass invalid data back
+                                   errors=errors), 400 # Use 400 Bad Request status
+
+        # Data is valid, create the new case dictionary
+        deadline_obj = None
+        if form_data.get('deadline'):
+             deadline_obj = datetime.strptime(form_data.get('deadline'), '%Y-%m-%d').date()
+
+        new_case = {
+            'id': next_id,
+            'case_number': form_data.get('case_number').strip(),
+            'case_name': form_data.get('case_name').strip(),
+            'client_name': form_data.get('client_name').strip(),
+            'deadline': deadline_obj,
+            'status': form_data.get('status'),
+            'notes': form_data.get('notes', '').strip(),
+            'created_at': datetime.now(timezone.utc), # Store UTC time
+            'updated_at': datetime.now(timezone.utc)
+        }
+        cases.append(new_case)
+        next_id += 1
+
+        flash(f"Case '{new_case['case_name']}' added successfully!", 'success')
+        # Redirect to the main index page after successful addition.
+        return redirect(url_for('index'))
+
+    # GET request: Just show the empty form
+    return render_template('case_form.html',
+                           form_title="Add New Case",
+                           submit_button_text="Add Case",
+                           statuses=CASE_STATUSES,
+                           case=None, # No existing case data for add form
+                           errors=None)
+
+
+@app.route('/case/edit/<int:case_id>', methods=['GET', 'POST'])
+def edit_case(case_id):
+    """Handles displaying the form with existing data and processing updates."""
+    case = find_case_by_id(case_id)
+    if not case:
+        flash('Case not found.', 'error')
+        return redirect(url_for('index'))
+
+    if request.method == 'POST':
+        form_data = request.form
+        errors = validate_case_data(form_data, is_edit=True)
+
+        if errors:
+            flash('Please correct the errors below.', 'error')
+            # Re-render edit form with errors, passing original case ID and *submitted* data
+            return render_template('case_form.html',
+                                   form_title="Edit Case",
+                                   submit_button_text="Update Case",
+                                   statuses=CASE_STATUSES,
+                                   case=form_data, # Show submitted data with errors
+                                   errors=errors), 400 # Use 400 Bad Request status
+
+        # Data is valid, update the case dictionary in place
+        deadline_obj = None
+        if form_data.get('deadline'):
+             deadline_obj = datetime.strptime(form_data.get('deadline'), '%Y-%m-%d').date()
+
+        case.update({
+            'case_number': form_data.get('case_number').strip(),
+            'case_name': form_data.get('case_name').strip(),
+            'client_name': form_data.get('client_name').strip(),
+            'deadline': deadline_obj,
+            'status': form_data.get('status'),
+            'notes': form_data.get('notes', '').strip(),
+            'updated_at': datetime.now(timezone.utc)
+        })
+
+        flash(f"Case '{case['case_name']}' updated successfully!", 'success')
+        return redirect(url_for('index'))
+
+    # GET request: Show the form pre-filled with the existing case data
+    return render_template('case_form.html',
+                           form_title="Edit Case",
+                           submit_button_text="Update Case",
+                           statuses=CASE_STATUSES,
+                           case=case, # Pass existing case data
+                           errors=None)
+
+
+@app.route('/case/delete/<int:case_id>', methods=['POST'])
+def delete_case(case_id):
+    """Handles the deletion of a case. Uses POST for safety."""
+    global cases # Needed because we are modifying the list itself
+    case = find_case_by_id(case_id)
+    if case:
+        # Filter out the case to be deleted
+        cases = [c for c in cases if c['id'] != case_id]
+        flash(f"Case '{case['case_name']}' deleted.", 'success')
+    else:
+        flash('Case not found.', 'error')
+
+    return redirect(url_for('index'))
+
+
+@app.route('/export')
+def export_cases():
+    """Exports all current cases to a CSV file download."""
+    if not cases:
+        flash('No cases to export.', 'error')
+        return redirect(url_for('index'))
+
+    # Use io.StringIO to build the CSV in memory
+    si = io.StringIO()
+    # Define expected headers - must match import expectations if used bidirectionally
+    # Use fieldnames relevant to the case data structure
+    fieldnames = ['id', 'case_number', 'case_name', 'client_name', 'deadline', 'status', 'notes', 'created_at', 'updated_at']
+    writer = csv.DictWriter(si, fieldnames=fieldnames)
+
+    writer.writeheader()
+    for case in cases:
+        # Create a copy to avoid modifying the original case dict
+        row_data = case.copy()
+        # Format dates for CSV consistency (YYYY-MM-DD)
+        if row_data['deadline']:
+             row_data['deadline'] = row_data['deadline'].strftime('%Y-%m-%d')
+        else:
+             row_data['deadline'] = '' # Use empty string for null dates
+        # Format datetimes (consider ISO format or simpler YYYY-MM-DD HH:MM:SS)
+        row_data['created_at'] = row_data['created_at'].strftime('%Y-%m-%d %H:%M:%S')
+        row_data['updated_at'] = row_data['updated_at'].strftime('%Y-%m-%d %H:%M:%S')
+        writer.writerow(row_data)
+
+
+    # Prepare the response for file download
+    output = si.getvalue()
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    filename = f"cases_export_{timestamp}.csv"
+
+    return Response(
+        output,
+        mimetype="text/csv",
+        headers={"Content-Disposition": f"attachment;filename={filename}"}
+    )
+
+
+@app.route('/import', methods=['POST'])
+def import_cases():
+    """Imports cases from an uploaded CSV file."""
+    global next_id # Needed to assign new IDs
+
+    if 'csvfile' not in request.files:
+        flash('No file part found in the request.', 'error')
+        return redirect(url_for('index'))
+
+    file = request.files['csvfile']
+
+    if file.filename == '':
+        flash('No file selected for uploading.', 'error')
+        return redirect(url_for('index'))
+
+    if file and file.filename.endswith('.csv'):
+        try:
+            # Read the file content directly from the upload stream
+            # Decode as UTF-8, handle potential encoding issues if necessary
+            stream = io.StringIO(file.stream.read().decode("UTF-8"), newline=None)
+            # Expect headers matching the export format, skip the 'id' on import.
+            # Adjust fieldnames if your CSV has different headers.
+            csv_reader = csv.DictReader(stream)
+
+            imported_count = 0
+            skipped_count = 0
+            for row in csv_reader:
+                # Basic validation for required fields from CSV row
+                # More robust validation (like checking status values) could be added
+                if not all(key in row for key in ['case_number', 'case_name', 'client_name', 'status']):
+                    print(f"Skipping row due to missing required keys: {row}")
+                    skipped_count += 1
+                    continue
+
+                deadline_obj = None
+                if row.get('deadline'):
+                    try:
+                        deadline_obj = datetime.strptime(row['deadline'], '%Y-%m-%d').date()
+                    except ValueError:
+                        print(f"Skipping row due to invalid deadline format: {row}")
+                        skipped_count += 1
+                        continue # Skip row if date format is wrong
+
+                # Assign a *new* ID, ignore any ID from the CSV to prevent conflicts
+                new_case = {
+                    'id': next_id,
+                    'case_number': row.get('case_number', '').strip(),
+                    'case_name': row.get('case_name', '').strip(),
+                    'client_name': row.get('client_name', '').strip(),
+                    'deadline': deadline_obj,
+                    'status': row.get('status', CASE_STATUSES[0]).strip(), # Default to first status if missing/invalid?
+                    'notes': row.get('notes', '').strip(),
+                    # Use current time for imported records' create/update stamps
+                    'created_at': datetime.now(timezone.utc),
+                    'updated_at': datetime.now(timezone.utc)
+                }
+
+                # Further validation: check if status is valid
+                if new_case['status'] not in CASE_STATUSES:
+                     print(f"Skipping row due to invalid status '{new_case['status']}': {row}")
+                     skipped_count += 1
+                     continue
+
+                cases.append(new_case)
+                next_id += 1
+                imported_count += 1
+
+            flash(f'Successfully imported {imported_count} cases. Skipped {skipped_count} rows.', 'success')
+
+        except Exception as e:
+            # Catch potential CSV parsing errors or other issues
+            print(f"Error during CSV import: {e}") # Log the actual error for debugging
+            flash(f'An error occurred during import: {e}', 'error')
+
+    else:
+        flash('Invalid file type. Please upload a .csv file.', 'error')
+
+    return redirect(url_for('index'))
+
+
+# --- Run the Application ---
+if __name__ == '__main__':
+    # Set debug=True for development (auto-reloads, provides debugger)
+    # IMPORTANT: Set debug=False in a production environment
+    app.run(debug=True)
+
