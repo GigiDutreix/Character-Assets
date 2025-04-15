@@ -1,0 +1,195 @@
+/**
+ * @fileoverview Core module for managing basic legal case information.
+ * Handles creation, retrieval, and status updates for cases.
+ * @version 1.0.1
+ * @author [Your Name/Software Engineer]
+ */
+
+// Predefined, common case lifecycle statuses used within the firm.
+// Configuration may be needed based on specific practice areas.
+const CASE_STATUSES = Object.freeze([
+    'Open',
+    'Pending',
+    'Discovery',
+    'In Trial',
+    'Settled',
+    'Closed',
+    'On Hold',
+    'Appeal'
+]);
+
+/**
+ * Manages the firm's collection of legal cases.
+ *
+ * IMPORTANT: This implementation uses in-memory storage ONLY.
+ * Case data WILL BE LOST when the application stops.
+ * A persistent database (e.g., SQL, NoSQL) is REQUIRED for production use
+ * to ensure data integrity and retention.
+ */
+class CaseManager {
+    /**
+     * Internal collection of case objects.
+     * @private
+     * @type {Array<object>}
+     */
+    _cases = [];
+
+    /**
+     * In-memory ID generator.
+     * WARNING: Not suitable for production. Use robust unique identifiers
+     * (e.g., UUIDs or database sequences) in a real system.
+     * @private
+     * @type {number}
+     */
+    _nextId = 1;
+
+    /**
+     * Creates an instance of CaseManager.
+     */
+    constructor() {
+        // Initialization logic (e.g., loading from persistent storage) would go here in a real app.
+        console.log("CaseManager initialized (In-Memory Mode).");
+    }
+
+    /**
+     * Retrieves a list of all currently managed cases.
+     * @returns {ReadonlyArray<object>} A list of case objects.
+     */
+    getAllCases() {
+        // Returns a shallow copy for safe read-only access.
+        return [...this._cases];
+    }
+
+    /**
+     * Finds and retrieves a specific case by its internal ID.
+     * @param {number} caseId - The unique internal identifier of the case.
+     * @returns {object | undefined} The case object if found, otherwise undefined.
+     */
+    getCaseById(caseId) {
+        // Basic validation for ID type.
+        if (typeof caseId !== 'number' || !Number.isInteger(caseId) || caseId <= 0) {
+             return undefined;
+        }
+        return this._cases.find(c => c.id === caseId);
+    }
+
+   /**
+     * Adds a new case record.
+     *
+     * @param {object} caseData - Details for the new case.
+     * @param {string} caseData.caseNumber - Official case number (essential for identification). Required.
+     * @param {string} caseData.caseName - Descriptive case name (e.g., 'Plaintiff v. Defendant'). Required.
+     * @param {string} caseData.clientName - Primary client associated with the matter. Required.
+     * @param {string} [caseData.caseType='General'] - Practice area or type (e.g., 'Litigation', 'Corporate').
+     * @param {string} [caseData.status='Open'] - Initial case status (must align with CASE_STATUSES).
+     * @param {string} [caseData.assignedAttorney='Unassigned'] - Responsible attorney.
+     * @param {string} [caseData.notes=''] - Initial case notes.
+     *
+     * @returns {object} The newly created case object, including its internal ID and creation timestamp.
+     * @throws {Error} If essential identifying fields (caseNumber, caseName, clientName) are missing or status is invalid.
+     */
+    addCase(caseData) {
+        if (!caseData || typeof caseData !== 'object') {
+            throw new Error("Invalid case data provided.");
+        }
+        const {
+            caseNumber,
+            caseName,
+            clientName,
+            caseType = 'General',
+            status = 'Open',
+            assignedAttorney = 'Unassigned',
+            notes = ''
+        } = caseData;
+
+        // Essential fields for case identification cannot be empty.
+        if (!caseNumber || typeof caseNumber !== 'string' || caseNumber.trim() === '') {
+            throw new Error("Case Number is required.");
+        }
+        if (!caseName || typeof caseName !== 'string' || caseName.trim() === '') {
+            throw new Error("Case Name is required.");
+        }
+        if (!clientName || typeof clientName !== 'string' || clientName.trim() === '') {
+            throw new Error("Client Name is required.");
+        }
+        // Ensure status aligns with the firm's standard lifecycle stages.
+        if (!CASE_STATUSES.includes(status)) {
+             throw new Error(`Invalid status: '${status}'. Must be one of the predefined statuses.`);
+        }
+
+        const newCase = {
+            id: this._nextId++, // Internal identifier (replace in production)
+            caseNumber: caseNumber.trim(),
+            caseName: caseName.trim(),
+            clientName: clientName.trim(),
+            caseType: caseType.trim(),
+            status: status,
+            assignedAttorney: assignedAttorney.trim(),
+            dateOpened: new Date().toISOString(), // Record creation time (UTC for consistency)
+            lastUpdated: new Date().toISOString(), // Tracks last modification (important for audit)
+            notes: notes,
+        };
+
+        this._cases.push(newCase);
+
+        // CRITICAL: In a real application, persist 'newCase' to the database HERE.
+        console.log(`Case added (In-Memory): ID ${newCase.id}, Number: ${newCase.caseNumber}`);
+
+        return { ...newCase }; // Return a copy
+    }
+
+    /**
+     * Updates the status of an existing case.
+     *
+     * @param {number} caseId - The internal ID of the case to update.
+     * @param {string} newStatus - The new status value (must be one of CASE_STATUSES).
+     * @returns {boolean} True if the update was successful, false if the case was not found or status is invalid.
+     */
+    updateCaseStatus(caseId, newStatus) {
+         if (typeof caseId !== 'number' || !Number.isInteger(caseId) || caseId <= 0) {
+             return false; // Invalid ID
+         }
+        if (!CASE_STATUSES.includes(newStatus)) {
+            console.error(`Invalid status for update: '${newStatus}'.`);
+            return false; // Ensure status consistency
+        }
+
+        const caseIndex = this._cases.findIndex(c => c.id === caseId);
+
+        if (caseIndex !== -1) {
+            this._cases[caseIndex].status = newStatus;
+            this._cases[caseIndex].lastUpdated = new Date().toISOString(); // Update modification timestamp
+
+            // CRITICAL: In a real application, save the updated case record to the database HERE.
+            console.log(`Case ID ${caseId} status updated to '${newStatus}' (In-Memory).`);
+            return true;
+        } else {
+            console.warn(`Case ID ${caseId} not found for status update.`);
+            return false;
+        }
+    }
+
+     /**
+      * Retrieves cases matching a specific status.
+      * @param {string} status - The status to filter by (must be one of CASE_STATUSES).
+      * @returns {ReadonlyArray<object>} An array of cases matching the status.
+      */
+     getCasesByStatus(status) {
+        if (!CASE_STATUSES.includes(status)) {
+             return []; // Return empty if status is not recognized
+        }
+         const filteredCases = this._cases.filter(c => c.status === status);
+         return [...filteredCases]; // Return a copy
+     }
+
+    // --- Potential Future Enhancements (Relevant to Law Firms) ---
+    // - updateCaseDetails(caseId, data): Modify fields beyond just status.
+    // - archiveCase(caseId): Implement case archiving according to firm retention policies (avoid simple deletion).
+    // - addCaseNote(caseId, noteText, author): Append time-stamped notes.
+    // - manageCaseDeadlines(caseId, deadlineData): Integrate deadline tracking per case.
+    // - searchCases(criteria): Implement searching by various fields (case number, client, etc.).
+    // - linkDocument(caseId, documentRef): Associate documents with cases.
+}
+
+export default CaseManager;
+export { CASE_STATUSES }; // Export statuses for potential use in UI components
