@@ -1,1 +1,2 @@
-# Legal Case Tracker Web App (Freelance Project - UpWork)
+# Legal Case Tracker Web App (Freelance Project - UpWork) 
+JAVASCRIPT
