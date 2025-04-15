@@ -1,0 +1,236 @@
+/**
+ * @fileoverview Calculates legal deadlines, considering business days and holidays.
+ * @version 1.0.3
+ * @author [Your Name/Software Engineer]
+ */
+
+// Configuration constants for valid units and weekend days (UTC). Frozen for immutability.
+const VALID_UNITS = Object.freeze(['days', 'weeks', 'months']);
+const WEEKEND_DAYS_UTC = Object.freeze([0, 6]); // 0 = Sunday, 6 = Saturday (UTC)
+
+/**
+ * Calculates legal deadlines based on start dates, duration, and configurable rules.
+ * Handles business day logic (weekends, holidays) and calendar additions.
+ *
+ * IMPORTANT: Internally uses UTC for all date calculations to ensure consistency
+ * and avoid ambiguities caused by local timezones or Daylight Saving Time shifts.
+ * Input strings ('YYYY-MM-DD') are parsed as UTC noon. Returned Date objects represent UTC time.
+ */
+class DeadlineCalculator {
+    /**
+     * Read-only array of holiday dates ('YYYY-MM-DD' UTC format).
+     * Initialized in the constructor.
+     * Note: Set offers faster lookups than Array.includes for very large lists.
+     * @private
+     * @type {ReadonlyArray<string>}
+     */
+    _holidays = [];
+
+    /**
+     * Safety limit for loop iterations to prevent potential infinite execution
+     * in date adjustment scenarios (e.g., long holiday periods).
+     * @private
+     * @const
+     * @type {number}
+     */
+    MAX_ITERATIONS = 1000;
+
+    /**
+     * Initializes the calculator with a validated list of holidays.
+     * @param {object} [options={}] - Configuration options.
+     * @param {string[]} [options.holidays=[]] - Holiday dates ('YYYY-MM-DD'). Invalid formats are ignored.
+     */
+    constructor(options = {}) {
+        const validHolidays = [];
+        if (options.holidays && Array.isArray(options.holidays)) {
+            options.holidays.forEach(holidayStr => {
+                if (/^\d{4}-\d{2}-\d{2}$/.test(holidayStr)) {
+                    // Use noon UTC ('T12:00:00Z') to represent the date consistently,
+                    // preventing timezone/DST shifts from changing the date itself during parsing.
+                    const date = new Date(`${holidayStr}T12:00:00Z`);
+                    if (!isNaN(date.getTime())) {
+                        validHolidays.push(date.toISOString().split('T')[0]);
+                    } else {
+                        console.warn(`[DeadlineCalculator] Invalid date value ignored: ${holidayStr}`);
+                    }
+                } else {
+                    console.warn(`[DeadlineCalculator] Invalid holiday format ignored: ${holidayStr}`);
+                }
+            });
+        }
+        // Freeze the array to make it effectively immutable after construction.
+        this._holidays = Object.freeze(validHolidays);
+    }
+
+    /**
+     * Checks if a UTC date falls on a weekend.
+     * @private
+     * @param {Date} date - The UTC date object.
+     * @returns {boolean}
+     */
+    _isWeekend(date) {
+        return WEEKEND_DAYS_UTC.includes(date.getUTCDay());
+    }
+
+    /**
+     * Checks if a UTC date matches a configured holiday.
+     * @private
+     * @param {Date} date - The UTC date object.
+     * @returns {boolean}
+     */
+    _isHoliday(date) {
+        // Assumes dateString is 'YYYY-MM-DD' UTC format for accurate comparison.
+        const dateString = date.toISOString().split('T')[0];
+        return this._holidays.includes(dateString);
+    }
+
+    /**
+     * Determines if a date is a valid business day according to specified rules.
+     * @private
+     * @param {Date} date - The UTC date object.
+     * @param {object} rules - Calculation rules derived from main method options.
+     * @returns {boolean}
+     */
+    _isValidBusinessDay(date, rules) {
+        // Determine exclusion flags, defaulting to true if `businessDaysOnly` is set.
+        const excludeWeekends = rules.businessDaysOnly ?? rules.excludeWeekends ?? rules.businessDaysOnly ?? true;
+        const excludeHolidays = rules.businessDaysOnly ?? rules.excludeHolidays ?? rules.businessDaysOnly ?? true;
+
+        if (excludeWeekends && this._isWeekend(date)) return false;
+        if (excludeHolidays && this._isHoliday(date)) return false;
+        return true;
+    }
+
+    /**
+     * Calculates the deadline date.
+     *
+     * @param {string | Date} startDateInput - Start date ('YYYY-MM-DD' string parsed as UTC, or Date object).
+     * @param {number} duration - Non-negative integer duration.
+     * @param {'days' | 'weeks' | 'months'} unit - The time unit.
+     * @param {object} [rules={}] - Calculation options.
+     * @param {boolean} [rules.businessDaysOnly=false] - Count only business days (weekends/holidays skipped). Best used with 'days' unit.
+     * @param {boolean} [rules.excludeWeekends] - Explicitly exclude weekends (used if businessDaysOnly=false or for adjustment).
+     * @param {boolean} [rules.excludeHolidays] - Explicitly exclude holidays (used if businessDaysOnly=false or for adjustment).
+     * @param {boolean} [rules.adjustToNextBusinessDay=false] - If the final calculated date falls on a non-business day, move it forward to the next valid business day.
+     * @param {boolean} [rules.startCountingOnNextBusinessDay=false] - If start date itself is not a business day, begin counting from the *next* business day.
+     *
+     * @returns {Date} The calculated deadline (JavaScript Date object representing UTC time).
+     * @throws {Error} For invalid inputs or potential infinite loops during date adjustments.
+     */
+    calculateDeadline(startDateInput, duration, unit = 'days', rules = {}) {
+        // --- Input Validation ---
+        if (!startDateInput || duration == null || !Number.isInteger(duration) || duration < 0) {
+            throw new Error('Start date and a non-negative integer duration are required.');
+        }
+        if (!VALID_UNITS.includes(unit)) {
+            throw new Error(`Invalid unit: ${unit}. Must be one of: ${VALID_UNITS.join(', ')}.`);
+        }
+        // Warn about potential ambiguity: 'businessDaysOnly' with 'weeks'/'months' often requires specific jurisdictional rules.
+        // This implementation interprets it as calendar weeks/months followed by adjustment if needed.
+        if (rules.businessDaysOnly && (unit === 'weeks' || unit === 'months')) {
+            console.warn(`[DeadlineCalculator] 'businessDaysOnly' with '${unit}' unit is ambiguous. Proceeding with calendar ${unit} addition followed by potential adjustment.`);
+        }
+
+        let startDate;
+        try {
+            // Standardize start date to a Date object representing UTC noon for internal consistency.
+            if (typeof startDateInput === 'string') {
+                if (!/^\d{4}-\d{2}-\d{2}$/.test(startDateInput)) throw new Error('Invalid date string format. Use YYYY-MM-DD.');
+                startDate = new Date(`${startDateInput}T12:00:00Z`);
+            } else if (startDateInput instanceof Date) {
+                startDate = new Date(Date.UTC( // Create new UTC date from input Date parts
+                    startDateInput.getFullYear(), startDateInput.getMonth(), startDateInput.getDate(),
+                    12, 0, 0, 0
+                ));
+            } else {
+                 throw new Error('Start date must be a YYYY-MM-DD string or Date object.');
+            }
+            if (isNaN(startDate.getTime())) { // Check validity after parsing/creation
+                throw new Error(`Invalid start date value: ${startDateInput}`);
+            }
+        } catch (e) {
+            throw new Error(`Failed to process start date: ${startDateInput}. ${e.message}`);
+        }
+
+        let currentDate = new Date(startDate.getTime()); // Work on a copy
+        let iterations = 0; // Safety counter for loops
+
+        // --- Optional: Adjust Start Date to next business day before counting ---
+        if (rules.startCountingOnNextBusinessDay && !this._isValidBusinessDay(currentDate, rules)) {
+            do {
+                currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+                iterations++;
+                if (iterations > this.MAX_ITERATIONS) throw new Error('Max iterations exceeded finding initial business day.');
+            } while (!this._isValidBusinessDay(currentDate, rules));
+            iterations = 0; // Reset for main calculation
+        }
+
+        // --- Main Calculation Logic ---
+        if (rules.businessDaysOnly && unit === 'days') {
+            // Count N business days forward, skipping invalid days
+            let businessDaysCounted = 0;
+            while (businessDaysCounted < duration) {
+                currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+                iterations++;
+                // Safety check against excessive looping (e.g., incorrect holidays/logic)
+                if (iterations > duration + 100 + this._holidays.length) {
+                   throw new Error(`Max iterations exceeded during business day calculation (duration: ${duration}). Review holidays or logic.`);
+                }
+                if (this._isValidBusinessDay(currentDate, rules)) {
+                    businessDaysCounted++;
+                }
+            }
+        } else {
+            // Add calendar duration (days, weeks, or months)
+            switch (unit) {
+                case 'days':
+                    currentDate.setUTCDate(currentDate.getUTCDate() + duration);
+                    break;
+                case 'weeks':
+                    currentDate.setUTCDate(currentDate.getUTCDate() + duration * 7);
+                    break;
+                case 'months': {
+                    const originalDay = startDate.getUTCDate();
+                    currentDate.setUTCMonth(currentDate.getUTCMonth() + duration);
+                    // Handle month-end adjustments: If adding months results in an earlier day number
+                    // (e.g., Jan 31 + 1 month -> Feb 29), adjust to the last valid day of the target month.
+                    // This matches common interpretation but may need overrides for specific court rules.
+                    if (currentDate.getUTCDate() < originalDay) {
+                         currentDate.setUTCDate(0); // Day 0 of current month is last day of previous month
+                    }
+                    break;
+                }
+            }
+
+            // --- Optional: Adjust Final Date to next business day ---
+            // Applied *after* calendar addition if requested.
+            if (rules.adjustToNextBusinessDay) {
+                iterations = 0; // Reset safety counter
+                // Define which rules apply for the *adjustment check* itself.
+                const adjustmentRules = {
+                     excludeWeekends: rules.excludeWeekends ?? true, // Default exclusion during adjustment
+                     excludeHolidays: rules.excludeHolidays ?? true,
+                };
+                while (!this._isValidBusinessDay(currentDate, adjustmentRules)) {
+                    currentDate.setUTCDate(currentDate.getUTCDate() + 1);
+                    iterations++;
+                    // Safety break for adjustment loop (e.g., consecutive holidays/weekends)
+                    if (iterations > 30) { // Allow ~1 month of consecutive non-business days
+                         throw new Error('Max iterations exceeded while adjusting final date to next business day. Check holiday list.');
+                    }
+                }
+            }
+        }
+
+        return currentDate; // The final deadline as a Date object (UTC)
+    }
+}
+
+// Export the class for use in other modules
+export default DeadlineCalculator;
+
+// --- Example Usage (Keep commented out unless running directly for tests/demos) ---
+/*
+function runExamples() { ... examples remain the same ... }
+runExamples();
+*/
